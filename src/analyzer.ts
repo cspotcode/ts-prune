@@ -1,4 +1,6 @@
+/* eslint-disable no-inner-declarations */
 import { ignoreComment } from "./constants";
+import * as real_ts from 'typescript';
 import {
   ExportDeclaration,
   ImportDeclaration,
@@ -18,6 +20,14 @@ import countBy from "lodash/fp/countBy";
 import last from "lodash/fp/last";
 import { realpathSync } from "fs";
 import { IConfigInterface } from "./configurator";
+import { F } from "lodash/fp";
+
+declare module "typescript" {
+  namespace FindAllReferences.Core {
+    function getReferencedSymbolsForSymbol(
+      originalSymbol: Symbol, node: Node | undefined, sourceFiles: readonly SourceFile[], sourceFilesSet: ReadonlySet<string>, checker: TypeChecker, cancellationToken: CancellationToken, options: Options, __callback__: Function): SymbolAndEntries[];
+  }
+}
 
 type OnResultType = (result: IAnalysedResult) => void;
 
@@ -161,6 +171,9 @@ export const getExported = (file: SourceFile) =>
       name: symbol.compilerSymbol.name,
       line: lineNumber(symbol)
     }));
+export const getExportedSymbols = (file: SourceFile) =>
+  file.getExportSymbols()
+    .filter(symbol => !mustIgnore(symbol, file));
 
 /* Returns all the "import './y';" imports, which must be for side effects */
 export const importsForSideEffects = (file: SourceFile): IAnalysedResult[] =>
@@ -203,33 +216,91 @@ const getReferences = (
   }
   return originalList;
 }
-export const getPotentiallyUnused = (file: SourceFile, skipper?: RegExp): IAnalysedResult => {
-  const exported = getExported(file);
+export const getPotentiallyUnused = (project: Project, file: SourceFile, skipper?: RegExp): IAnalysedResult => {
+  const ls = project.getLanguageService();
+  const program = ls.getProgram();
+  const sourceFiles = project.getSourceFiles().map(s => s.compilerNode);
+  const exportedSyms = getExportedSymbols(file);
+  const referencedInFile = new Set<string>();
+  const referenced = new Set<string>();
+  const checker = program.getTypeChecker().compilerObject;
+  const sourceFilesSet = new real_ts.Set(sourceFiles.map(function (f) { return f.fileName; }));
+  Exp:
+  for(const exp of exportedSyms) {
+    let inFile = false;
+    const decl = exp.getDeclarations()[0];
+    const declStart = decl.getStart();
+    const declEnd = decl.getEnd();
+    const ContinueExp = {};
+    try {
+      real_ts.FindAllReferences.Core.getReferencedSymbolsForSymbol(
+        exp.compilerSymbol as any as real_ts.Symbol,
+        undefined,
+        sourceFiles as any as real_ts.SourceFile[],
+        sourceFilesSet as any as real_ts.ReadonlySet<string>,
+        checker as any as real_ts.TypeChecker,
+        {
+          isCancellationRequested() { return false },
+          throwIfCancellationRequested() {}
+        },
+        {
+          implementations: false,
+          use: real_ts.FindAllReferences.FindReferencesUse.Other
+        },
+        __callback__
+      );
+    } catch(e) {
+      if(e === ContinueExp) continue Exp;
+      throw e;
+    }
+    function __callback__(entry: real_ts.FindAllReferences.NodeEntry) {
+      const referenceNode = entry.node;
+      const referenceSourceFile = referenceNode.getSourceFile();
+      if(skipper?.test(referenceSourceFile.fileName)) return;
+      if(referenceSourceFile !== file.compilerNode as any as real_ts.SourceFile) {
+        // TODO switch to ts.FindAllReferences.Core.eachExportReference?
+        referenced.add(exp.compilerSymbol.name);
+        throw ContinueExp;
+      } else if(!inFile && (referenceNode.getStart() < declStart || referenceNode.getEnd() > declEnd)) {
+        inFile = true;
+        // TODO Switch to ts.FindAllReferences.Core.isSymbolReferencedInFile?
+        referencedInFile.add(exp.compilerSymbol.name);
+      } else {
+      }
+    }
+    // const refs = ls.findReferences(decl);
+    // for(const ref of refs) {
+    //   for(const ref2 of ref.getReferences()) {
+    //     const sf = ref2.getSourceFile();
+    //     if(skipper?.test(sf.compilerNode.fileName)) continue;
+    //     if(sf !== file) {
+    //       // TODO switch to ts.FindAllReferences.Core.eachExportReference?
+    //       referenced.add(exp.compilerSymbol.name);
+    //       continue Exp;
+    //       // console.log(exp.getName(), 'referenced by', ref2.getSourceFile().getFilePath());
+    //     } else if(!inFile && (ref2.getTextSpan().getStart() < decl.getStart() || ref2.getTextSpan().getEnd() > decl.getEnd())) {
+    //       // console.log(decl.getText(), 'referenced by', file.getFullText().slice(ref2.getTextSpan().getStart(), ref2.getTextSpan().getEnd()));
+    //       inFile = true;
+    //       // TODO Switch to ts.FindAllReferences.Core.isSymbolReferencedInFile?
+    //       referencedInFile.add(exp.compilerSymbol.name);
+    //     }
+    //   }
+    // }
+  }
+  // const exported = getExported(file);
 
-  const idsInFile = file.getDescendantsOfKind(ts.SyntaxKind.Identifier);
-  const referenceCounts = countBy(x => x)((idsInFile || []).map(node => node.getText()));
-  const referencedInFile = Object.entries(referenceCounts)
-    .reduce(
-      (previous, [name, count]) => previous.concat(count > 1 ? [name] : []),
-      []
-    );
+  // const idsInFile = file.getDescendantsOfKind(ts.SyntaxKind.Identifier);
+  // const referenceCounts = countBy(x => x)((idsInFile || []).map(node => node.getText()));
+  // const referencedInFile = Object.entries(referenceCounts)
+  //   .reduce(
+  //     (previous, [name, count]) => previous.concat(count > 1 ? [name] : []),
+  //     []
+  //   );
 
-  const referenced = getReferences(
-    file.getReferencingNodesInOtherSourceFiles(),
-    skipper
-  ).reduce(
-      (previous, node: SourceFileReferencingNodes) => {
-        const kind = node.getKind().toString();
-        const value = nodeHandlers?.[kind]?.(node) ?? [];
-
-        return previous.concat(value);
-      },
-      []
-    );
-
-  const unused = referenced.includes("*") ? [] :
-    exported.filter(exp => !referenced.includes(exp.name))
-      .map(exp => ({ ...exp, usedInModule: referencedInFile.includes(exp.name) }))
+  const unused = referenced.has("*") ? [] :
+    exportedSyms.filter(exp => !referenced.has(exp.compilerSymbol.name))
+      .map(exp => ({ name: exp.compilerSymbol.name,
+        line: lineNumber(exp), usedInModule: referencedInFile.has(exp.compilerSymbol.name) }))
 
   return {
     file: file.getFilePath(),
@@ -254,12 +325,14 @@ const filterSkippedFiles = (sourceFiles: SourceFile[], skipper: RegExp | undefin
 }
 
 export const analyze = (project: Project, onResult: OnResultType, entrypoints: string[], skipPattern?: string) => {
+  const ls = project.getLanguageService();
   const skipper = skipPattern ? new RegExp(skipPattern) : undefined;
 
+  const sourceFiles = project.getSourceFiles();
   filterSkippedFiles(project.getSourceFiles(), skipper)
   .forEach(file => {
     [
-      getPotentiallyUnused(file, skipper),
+      getPotentiallyUnused(project, file, skipper),
       ...getDefinitelyUsed(file),
     ].forEach(result => {
       if (!result.file) return // Prevent passing along a "null" filepath. Fixes #105
@@ -269,3 +342,15 @@ export const analyze = (project: Project, onResult: OnResultType, entrypoints: s
 
   emitTsConfigEntrypoints(entrypoints, onResult);
 };
+
+export function unused() {
+
+}
+
+/**
+ * see unused
+ * @see {unused}
+ */
+export function other() {
+
+}

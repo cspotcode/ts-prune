@@ -25,6 +25,7 @@
     "@types/json5": "^0.0.30",
     "@types/lodash": "^4.14.150",
     "@types/node": "^13.13.1",
+    "@types/ts-expose-internals": "npm:ts-expose-internals@4.3.2",
     "@typescript-eslint/parser": "^2.29.0",
     "eslint": "^6.8.0",
     "eslint-config-prettier": "^6.11.0",
@@ -33,7 +34,7 @@
     "semantic-release": "^17.2.3",
     "ts-jest": "^25.4.0",
     "ts-node": "^8.9.0",
-    "typescript": "^4.3.2"
+    "typescript": "portal:./typescript-patch/node_modules/typescript"
   },
   "dependencies": {
     "commander": "^6.2.1",
@@ -53,5 +54,9 @@
       "master"
     ]
   },
-  "types": "lib/index.d.ts"
+  "resolutions": {
+    "ts-morph/typescript": "portal:./typescript-patch/node_modules/typescript"
+  },
+  "types": "lib/index.d.ts",
+  "packageManager": "yarn@3.1.1"
 }

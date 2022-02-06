@@ -2,6 +2,7 @@
 async function test1() {
     const mything = await import("./succ");
     console.log(mything);
+    console.log(mything.bar);
 }
 
 async function test2() {
